@@ -1,0 +1,25 @@
+{
+  "name": "meeting-room-booking-backend",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "bcrypt": "*",
+    "cookie-parser": "*",
+    "cors": "*",
+    "dotenv": "*",
+    "express": "*",
+    "express-session": "*",
+    "helmet": "*",
+    "mssql": "*",
+    "connect-mssql-v2": "*",
+    "morgan": "*"
+  },
+  "devDependencies": {
+    "nodemon": "*"
+  }
+}

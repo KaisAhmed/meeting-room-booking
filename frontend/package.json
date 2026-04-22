@@ -1,0 +1,28 @@
+{
+  "name": "meeting-room-booking-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fullcalendar/core": "*",
+    "@fullcalendar/daygrid": "*",
+    "@fullcalendar/interaction": "*",
+    "@fullcalendar/timegrid": "*",
+    "@fullcalendar/vue3": "*",
+    "@mdi/font": "*",
+    "pinia": "*",
+    "vue": "*",
+    "vue-router": "*",
+    "vuetify": "*"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "*",
+    "sass": "*",
+    "vite": "*"
+  }
+}
