@@ -4,10 +4,10 @@ const helmet = require('helmet')
 const morgan = require('morgan')
 const cookieParser = require('cookie-parser')
 const session = require('express-session')
-const MSSQLStore = require('connect-mssql-v2')
+const MySQLStore = require('express-mysql-session')(session)
 
 const { requireAuth } = require('./middleware/auth')
-const { parseConnectionStringToConfig } = require('./db/pool')
+const { getPool } = require('./db/pool')
 
 const authRoutes = require('./routes/auth')
 const bookingRoutes = require('./routes/bookings')
@@ -30,6 +30,24 @@ function createApp() {
     }),
   )
 
+  // Create MySQL session store
+  const sessionStore = new MySQLStore({
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT) || 3306,
+    database: process.env.DB_NAME || 'meeting_room_booking',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    createDatabaseTable: false, // We create the table manually
+    schema: {
+      tableName: 'sessions',
+      columnNames: {
+        session_id: 'session_id',
+        expires: 'expires',
+        data: 'data'
+      }
+    }
+  })
+
   app.use(
     session({
       secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
@@ -40,14 +58,7 @@ function createApp() {
         sameSite: 'lax',
         secure: false, // for local dev
       },
-      store: new MSSQLStore(
-        parseConnectionStringToConfig(process.env.SQL_CONNECTION_STRING),
-        {
-          table: '[dbo].[sessions]',
-          ttl: 24 * 60 * 60 * 1000,
-          useUTC: false,
-        },
-      ),
+      store: sessionStore,
     }),
   )
 

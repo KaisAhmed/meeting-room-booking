@@ -14,9 +14,9 @@
     "dotenv": "*",
     "express": "*",
     "express-session": "*",
+    "express-mysql-session": "*",
     "helmet": "*",
-    "mssql": "*",
-    "connect-mssql-v2": "*",
+    "mysql2": "*",
     "morgan": "*"
   },
   "devDependencies": {

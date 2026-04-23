@@ -11,12 +11,17 @@ async function main() {
   const port = process.env.PORT || 3000
   app.listen(port, () => {
     console.log(`MeetingBooking API listening on port ${port}`)
-    console.log('SQL_CONNECTION_STRING:', process.env.SQL_CONNECTION_STRING ? 'SET' : 'EMPTY')
+    console.log('DB Config:', {
+      host: process.env.DB_HOST || 'localhost',
+      port: process.env.DB_PORT || 3306,
+      database: process.env.DB_NAME || 'meeting_room_booking',
+      user: process.env.DB_USER || 'root'
+    })
   })
 
   // DB init is best-effort:
-  // - keep server up for health/debugging even if SQL env is missing
-  // - routes will still fail until SQL_CONNECTION_STRING is correct
+  // - keep server up for health/debugging even if DB env is missing
+  // - routes will still fail until MySQL config is correct
   try {
     const pool = await getPool()
     await ensureInitialData(pool)

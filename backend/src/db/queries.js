@@ -1,45 +1,35 @@
-const { getPool, sql } = require('./pool')
+const { getPool } = require('./pool')
 
 async function getUserByUsername(username) {
   const pool = await getPool()
-  const result = await pool
-    .request()
-    .input('username', sql.NVarChar(50), username)
-    .query(`
-      SELECT TOP 1 id, username, password_hash, role
-      FROM users
-      WHERE username = @username
-    `)
+  const [rows] = await pool.execute(`
+    SELECT id, username, password_hash, role
+    FROM users
+    WHERE username = ?
+    LIMIT 1
+  `, [username])
 
-  return result.recordset[0] || null
+  return rows[0] || null
 }
 
 async function getBookingTypes() {
   const pool = await getPool()
-  const result = await pool
-    .request()
-    .query(`
-      SELECT id, name, color
-      FROM booking_types
-      ORDER BY id
-    `)
+  const [rows] = await pool.execute(`
+    SELECT id, name, color
+    FROM booking_types
+    ORDER BY id
+  `)
 
-  return result.recordset
+  return rows
 }
 
 async function getBookingsForRange({ from, to, role, userId, roomId, statuses }) {
   const pool = await getPool()
 
-  const request = pool
-    .request()
-    .input('from', sql.DateTime2, from)
-    .input('to', sql.DateTime2, to)
-    .input('roomId', sql.Int, roomId)
-
-  if (role !== 'admin') request.input('userId', sql.UniqueIdentifier, userId)
+  const params = [roomId, to, from]
+  let statusClause = ''
 
   const validStatuses = ['pending', 'approved', 'rejected']
-  let statusClause = ''
 
   if (Array.isArray(statuses) && statuses.length > 0) {
     const normalized = statuses
@@ -47,19 +37,20 @@ async function getBookingsForRange({ from, to, role, userId, roomId, statuses })
       .filter((s) => validStatuses.includes(s))
 
     if (normalized.length > 0) {
-      const placeholders = normalized.map((status, index) => `@status${index}`).join(', ')
-      normalized.forEach((status, index) => {
-        request.input(`status${index}`, sql.NVarChar(20), status)
-      })
-      statusClause = `AND b.status IN (${placeholders})`
+      const placeholders = normalized.map(() => '?').join(', ')
       if (role !== 'admin') {
-        statusClause = `AND b.user_id = @userId ${statusClause}`
+        statusClause = `AND b.status IN (${placeholders}) AND b.user_id = ?`
+        params.push(...normalized, userId)
+      } else {
+        statusClause = `AND b.status IN (${placeholders})`
+        params.push(...normalized)
       }
     }
   } else if (role === 'admin') {
     statusClause = `AND b.status IN ('approved','pending','rejected')`
   } else {
-    statusClause = `AND b.user_id = @userId AND b.status IN ('approved','pending','rejected')`
+    params.push(userId)
+    statusClause = `AND b.user_id = ? AND b.status IN ('approved','pending','rejected')`
   }
 
   const query = `
@@ -77,15 +68,15 @@ async function getBookingsForRange({ from, to, role, userId, roomId, statuses })
     INNER JOIN booking_types bt ON bt.id = b.booking_type_id
     INNER JOIN users u ON u.id = b.user_id
     WHERE
-      b.room_id = @roomId
-      AND b.start_time < @to
-      AND b.end_time > @from
+      b.room_id = ?
+      AND b.start_time < ?
+      AND b.end_time > ?
       ${statusClause}
     ORDER BY b.start_time
   `
 
-  const result = await request.query(query)
-  return result.recordset
+  const [rows] = await pool.execute(query, params)
+  return rows
 }
 
 async function createBookingRequest({
@@ -108,56 +99,44 @@ async function createBookingRequest({
   }
 
   const pool = await getPool()
-  const tx = new sql.Transaction(pool)
+  const connection = await pool.getConnection()
 
-  await tx.begin()
+  await connection.beginTransaction()
   try {
-    const request = new sql.Request(tx)
-    request.input('roomId', sql.Int, roomId)
-    request.input('userId', sql.UniqueIdentifier, userId)
-    request.input('bookingTypeId', sql.Int, bookingTypeId)
-    request.input('start', sql.DateTime2, startTime)
-    request.input('end', sql.DateTime2, endTime)
-    request.input('meetingReason', sql.NVarChar(500), meetingReason || '')
-
-    const conflict = await request.query(`
-      SELECT TOP 1 id
+    // Check for conflicts
+    const [conflictRows] = await connection.execute(`
+      SELECT id
       FROM bookings
       WHERE
-        room_id = @roomId
+        room_id = ?
         AND status IN ('pending','approved')
-        AND start_time < @end
-        AND end_time > @start
-    `)
+        AND start_time < ?
+        AND end_time > ?
+      LIMIT 1
+    `, [roomId, endTime, startTime])
 
-    if (conflict.recordset.length > 0) {
+    if (conflictRows.length > 0) {
       const e = new Error('Time conflict')
       e.statusCode = 409
       throw e
     }
 
-    await request.query(`
+    // Insert booking
+    await connection.execute(`
       INSERT INTO bookings
         (room_id, user_id, booking_type_id, start_time, end_time, meeting_reason, status)
       VALUES
-        (@roomId, @userId, @bookingTypeId, @start, @end, @meetingReason, 'pending')
-    `)
+        (?, ?, ?, ?, ?, ?, 'pending')
+    `, [roomId, userId, bookingTypeId, startTime, endTime, meetingReason || ''])
 
-    const insertedIdResult = await request.query(`
-      SELECT TOP 1 id
-      FROM bookings
-      WHERE
-        room_id=@roomId
-        AND user_id=@userId
-        AND booking_type_id=@bookingTypeId
-        AND start_time=@start
-        AND end_time=@end
-      ORDER BY id DESC
+    // Get the inserted ID
+    const [idRows] = await connection.execute(`
+      SELECT LAST_INSERT_ID() as id
     `)
+    const insertedId = idRows[0].id
 
-    const insertedId = insertedIdResult.recordset[0].id
-    request.input('insertedId', sql.Int, insertedId)
-    const created = await request.query(`
+    // Get the created booking
+    const [createdRows] = await connection.execute(`
       SELECT
         b.id,
         b.start_time,
@@ -171,41 +150,39 @@ async function createBookingRequest({
       FROM bookings b
       INNER JOIN booking_types bt ON bt.id=b.booking_type_id
       INNER JOIN users u ON u.id=b.user_id
-      WHERE b.id=@insertedId
-    `)
+      WHERE b.id=?
+    `, [insertedId])
 
-    created.recordset[0].id = insertedId
-    await tx.commit()
-    return created.recordset[0]
+    await connection.commit()
+    return createdRows[0]
   } catch (err) {
-    await tx.rollback()
+    await connection.rollback()
     throw err
+  } finally {
+    connection.release()
   }
 }
 
 async function getDashboardStats({ role, userId, roomId }) {
   const pool = await getPool()
-  const request = pool.request()
-  request.input('roomId', sql.Int, roomId)
-  request.input('now', sql.DateTime2, new Date())
-  request.input('weekEnd', sql.DateTime2, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000))
+  const params = [new Date(), new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), roomId]
 
-  const whereUser = role === 'admin' ? '' : ' AND user_id = @userId'
-  if (role !== 'admin') request.input('userId', sql.UniqueIdentifier, userId)
+  const whereUser = role === 'admin' ? '' : ' AND user_id = ?'
+  if (role !== 'admin') params.push(userId)
 
   const query = `
     SELECT
       SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pendingCount,
       SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) AS approvedCount,
-      SUM(CASE WHEN status='approved' AND start_time >= @now AND start_time < @weekEnd THEN 1 ELSE 0 END) AS upcomingCount
+      SUM(CASE WHEN status='approved' AND start_time >= ? AND start_time < ? THEN 1 ELSE 0 END) AS upcomingCount
     FROM bookings
-    WHERE room_id=@roomId
+    WHERE room_id=?
       AND status IN ('pending','approved')
       ${whereUser}
   `
 
-  const result = await request.query(query)
-  const row = result.recordset[0] || {}
+  const [rows] = await pool.execute(query, params)
+  const row = rows[0] || {}
   return {
     pendingCount: row.pendingCount || 0,
     approvedCount: row.approvedCount || 0,
@@ -215,147 +192,130 @@ async function getDashboardStats({ role, userId, roomId }) {
 
 async function getAdminRequests({ roomId }) {
   const pool = await getPool()
-  const result = await pool
-    .request()
-    .input('roomId', sql.Int, roomId)
-    .query(`
-      SELECT
-        b.id,
-        b.start_time,
-        b.end_time,
-        b.status,
-        b.meeting_reason,
-        b.booking_type_id,
-        bt.name AS bookingTypeName,
-        bt.color AS bookingTypeColor,
-        u.username AS requestedBy
-      FROM bookings b
-      INNER JOIN booking_types bt ON bt.id=b.booking_type_id
-      INNER JOIN users u ON u.id=b.user_id
-      WHERE
-        b.room_id=@roomId
-        AND b.status='pending'
-      ORDER BY b.start_time
-    `)
+  const [rows] = await pool.execute(`
+    SELECT
+      b.id,
+      b.start_time,
+      b.end_time,
+      b.status,
+      b.meeting_reason,
+      b.booking_type_id,
+      bt.name AS bookingTypeName,
+      bt.color AS bookingTypeColor,
+      u.username AS requestedBy
+    FROM bookings b
+    INNER JOIN booking_types bt ON bt.id=b.booking_type_id
+    INNER JOIN users u ON u.id=b.user_id
+    WHERE
+      b.room_id=?
+      AND b.status='pending'
+    ORDER BY b.start_time
+  `, [roomId])
 
-  return result.recordset
+  return rows
 }
 
 async function getUsers() {
   const pool = await getPool()
-  const result = await pool
-    .request()
-    .query(`
-      SELECT id, username, role, created_at
-      FROM users
-      ORDER BY created_at DESC
-    `)
-  return result.recordset
+  const [rows] = await pool.execute(`
+    SELECT id, username, role, created_at
+    FROM users
+    ORDER BY created_at DESC
+  `)
+  return rows
 }
 
 async function createUser({ username, passwordHash, role }) {
   const pool = await getPool()
-  const request = pool.request()
-  request.input('username', sql.NVarChar(50), username)
-  request.input('passwordHash', sql.NVarChar(255), passwordHash)
-  request.input('role', sql.NVarChar(20), role)
-
-  await request.query(`
+  await pool.execute(`
     INSERT INTO users (username, password_hash, role)
-    VALUES (@username, @passwordHash, @role)
-  `)
+    VALUES (?, ?, ?)
+  `, [username, passwordHash, role])
 
   return getUserByUsername(username)
 }
 
 async function updateUser({ id, role, passwordHash }) {
   const pool = await getPool()
-  const request = pool.request()
-  request.input('id', sql.UniqueIdentifier, id)
-  request.input('role', sql.NVarChar(20), role)
   const setClauses = [
-    `role = @role`
+    'role = ?'
   ]
+  const params = [role, id]
 
   if (passwordHash) {
-    request.input('passwordHash', sql.NVarChar(255), passwordHash)
-    setClauses.push(`password_hash = @passwordHash`)
+    setClauses.push('password_hash = ?')
+    params.unshift(passwordHash)
   }
 
-  await request.query(`
+  await pool.execute(`
     UPDATE users
     SET ${setClauses.join(', ')}
-    WHERE id = @id
-  `)
+    WHERE id = ?
+  `, params)
 
-  const result = await pool
-    .request()
-    .input('id', sql.UniqueIdentifier, id)
-    .query(`
-      SELECT id, username, role, created_at
-      FROM users
-      WHERE id = @id
-    `)
+  const [rows] = await pool.execute(`
+    SELECT id, username, role, created_at
+    FROM users
+    WHERE id = ?
+  `, [id])
 
-  return result.recordset[0]
+  return rows[0]
 }
 
 async function deleteUser({ id }) {
   const pool = await getPool()
-  const request = pool.request()
-  request.input('id', sql.UniqueIdentifier, id)
-  await request.query(`
+  await pool.execute(`
     DELETE FROM users
-    WHERE id = @id
-  `)
+    WHERE id = ?
+  `, [id])
   return true
 }
 
 async function decideBooking({ bookingId, decision, rejectReason }) {
   const pool = await getPool()
-  const tx = new sql.Transaction(pool)
-  await tx.begin()
-  try {
-    const request = new sql.Request(tx)
-    request.input('id', sql.Int, bookingId)
-    request.input('decision', sql.NVarChar(20), decision)
-    request.input('rejectReason', sql.NVarChar(500), rejectReason || null)
+  const connection = await pool.getConnection()
 
-    const updated = await request.query(`
+  await connection.beginTransaction()
+  try {
+    await connection.execute(`
       UPDATE bookings
       SET
-        status = CASE WHEN @decision IN ('approved','rejected') THEN @decision ELSE status END,
-        admin_reject_reason = CASE WHEN @decision='rejected' THEN @rejectReason ELSE NULL END,
-        decision_at = SYSDATETIME(),
-        updated_at = SYSDATETIME()
+        status = CASE WHEN ? IN ('approved','rejected') THEN ? ELSE status END,
+        admin_reject_reason = CASE WHEN ?='rejected' THEN ? ELSE NULL END,
+        decision_at = NOW(),
+        updated_at = NOW()
       WHERE
-        id=@id
-        AND status='pending';
+        id=?
+        AND status='pending'
+    `, [decision, decision, decision, rejectReason || null, bookingId])
 
-      SELECT TOP 1 id, status
+    const [rows] = await connection.execute(`
+      SELECT id, status
       FROM bookings
-      WHERE id=@id
-    `)
+      WHERE id=?
+    `, [bookingId])
 
-    const row = updated.recordset[0]
+    const row = rows[0]
     if (!row) {
       const e = new Error('Booking not found')
       e.statusCode = 404
       throw e
     }
 
-    // Re-check final state (if was not pending, row may still show old status).
+    // Check if was not pending, row may still show old status
     if (row.status !== decision) {
       const e = new Error('Unable to update booking')
       e.statusCode = 409
       throw e
     }
 
-    await tx.commit()
+    await connection.commit()
     return { id: row.id, status: row.status }
   } catch (err) {
-    await tx.rollback()
+    await connection.rollback()
     throw err
+  } finally {
+    connection.release()
   }
 }
 
